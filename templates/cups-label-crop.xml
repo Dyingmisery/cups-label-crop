@@ -10,10 +10,12 @@
   <Support>https://github.com/Dyingmisery/cups-label-crop/issues</Support>
   <Project>https://github.com/Dyingmisery/cups-label-crop</Project>
   <Overview>CUPS print server with AirPrint and a "Label Crop" queue for online sellers. Print a Vinted, InPost, Evri (or other carrier) A4/Letter shipping sheet to "Label Crop" and it finds the shipping label on the page, crops it, turns it upright and sends a sharp 4x6 label to your thermal printer (Zebra, Rollo, Munbyn, SATO, Brother, DYMO... anything with a CUPS driver).[br][br]Setup: start the container, open the WebUI (login with CUPSADMIN/CUPSPASSWORD), add your label printer with the queue name you set in TARGET_PRINTER (default Label_Printer). Vendor drivers (.deb) dropped into /config/drivers are installed at every start. Host networking is required for AirPrint discovery.[br][br]Free software under GPL-3.0. Label detection is based on dodopus/vinted-label-4x6.</Overview>
-  <Category>Tools: Network:Print</Category>
+  <Category>Tools:Utilities Network:Other</Category>
+  <ExtraSearchTerms>vinted inpost evri royalmail airprint cups printer label thermal 4x6 crop shipping zebra rollo munbyn sato dymo</ExtraSearchTerms>
   <WebUI>http://[IP]:[PORT:631]/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/Dyingmisery/cups-label-crop/main/templates/cups-label-crop.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/Dyingmisery/cups-label-crop/main/assets/icon.png</Icon>
+  <ReadMe>https://raw.githubusercontent.com/Dyingmisery/cups-label-crop/main/README.md</ReadMe>
   <ExtraParams/>
   <PostArgs/>
   <CPUset/>

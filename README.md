@@ -130,10 +130,12 @@ Download, read, dry-run, then install. Please don't pipe it into a shell.
 ```bash
 # 1. Get a release (or: git clone https://github.com/Dyingmisery/cups-label-crop)
 curl -fLO https://github.com/Dyingmisery/cups-label-crop/archive/refs/tags/v0.1.0.tar.gz
+sha256sum v0.1.0.tar.gz                     # must match "v0.1.0.tar.gz" under Checksums in the release notes
 tar xzf v0.1.0.tar.gz && cd cups-label-crop-0.1.0
 
-# 2. Check the files (compare with the checksums in the release notes), and read the script
-sha256sum -c addon/SHA256SUMS
+# 2. Check the files, and read the script
+sha256sum -c addon/SHA256SUMS               # every line must say OK
+sha256sum addon/install.sh                  # must match the addon/install.sh line in the release notes
 less addon/install.sh
 
 # 3. See exactly what it would do. Nothing is changed.

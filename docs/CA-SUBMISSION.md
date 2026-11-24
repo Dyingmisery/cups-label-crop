@@ -1,16 +1,16 @@
 # Submitting to Unraid Community Applications
 
-CA submissions now go through **https://ca.unraid.net/submit** (sign in with your Unraid account). The site validates and scans the GitHub repo, checks for duplicates, and a moderator reviews it. Approved apps appear after the next catalog build. A forum support thread is not strictly required (a GitHub support URL satisfies the rule), but CA expects apps to be supported, so open one.
+CA submissions now go through **https://ca.unraid.net/submit/new** (sign in with your Unraid account). The site validates and scans the GitHub repo, checks for duplicates, and a moderator reviews it (usually within 48 hours). Approved apps appear after the next catalog build. Unraid's submission policy requires **a dedicated support thread on the Unraid forums**, so open that first and link it from the template.
 
 ## What the repo already has
 
 | Requirement | File |
 |---|---|
-| Public, active GitHub repo | *(after publishing)* |
+| Public, active GitHub repo | https://github.com/Dyingmisery/cups-label-crop |
 | OSI-approved license at the root | `LICENSE` (GPL-3.0) |
 | `ca_profile.xml` at the root with a non-empty `<Profile>` | `ca_profile.xml` |
 | One Docker template XML per app | `templates/cups-label-crop.xml` |
-| Public image the template points at | `ghcr.io/dyingmisery/cups-label-crop:latest` *(after step 2 of PUBLISHING.md)* |
+| Public image the template points at | `ghcr.io/dyingmisery/cups-label-crop:latest` (public, amd64 + arm64) |
 | Icon | `assets/icon.png` (512x512), raw URL in the template and profile |
 
 ## Steps
@@ -48,7 +48,9 @@ After it is listed, template changes go live on the next CA catalog build. Bump 
 >
 > Remote printing over Tailscale and the iOS profile are covered in the README.
 >
-> **Links:** GitHub: https://github.com/Dyingmisery/cups-label-crop · Image: `ghcr.io/dyingmisery/cups-label-crop`
+> **Links:** GitHub: https://github.com/Dyingmisery/cups-label-crop · Releases: https://github.com/Dyingmisery/cups-label-crop/releases · Image: `ghcr.io/dyingmisery/cups-label-crop`
+>
+> Already running CUPS somewhere else (a Pi, another container)? There is also a careful add-on installer for existing CUPS servers; see "Add-on for an existing CUPS server" in the README.
 >
 > **When asking for help, please post:** your printer model and how it is connected, the container log (`docker logs cups-label-crop`), and the job's message from the CUPS web UI (*Jobs* tab). If a label is detected wrongly, an anonymised sample PDF helps a lot. **Please do not post real labels; they contain names and addresses.**
 >
