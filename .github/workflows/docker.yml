@@ -24,8 +24,11 @@ jobs:
             addon/install.sh tools/update-addon-checksums.sh
           shellcheck -S warning tests/addon/*.sh
       - name: addon/SHA256SUMS is up to date
-        run: ./tools/update-addon-checksums.sh && git diff --exit-code addon/SHA256SUMS
-          xmllint --noout templates/cups-label-crop.xml ca_profile.xml
+        run: |
+          ./tools/update-addon-checksums.sh
+          git diff --exit-code -- addon/SHA256SUMS
+      - name: Validate XML (Unraid template, CA profile)
+        run: xmllint --noout templates/cups-label-crop.xml ca_profile.xml
       - name: Build test image (amd64)
         run: docker build -t cups-label-crop:test .
       - name: Container end-to-end tests
