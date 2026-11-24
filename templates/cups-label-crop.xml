@@ -1,0 +1,41 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>cups-label-crop</Name>
+  <Repository>ghcr.io/dyingmisery/cups-label-crop:latest</Repository>
+  <Registry>https://github.com/Dyingmisery/cups-label-crop/pkgs/container/cups-label-crop</Registry>
+  <Network>host</Network>
+  <MyIP/>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/Dyingmisery/cups-label-crop/issues</Support>
+  <Project>https://github.com/Dyingmisery/cups-label-crop</Project>
+  <Overview>CUPS print server with AirPrint and a "Label Crop" queue for online sellers. Print a Vinted, InPost, Evri (or other carrier) A4/Letter shipping sheet to "Label Crop" and it finds the shipping label on the page, crops it, turns it upright and sends a sharp 4x6 label to your thermal printer (Zebra, Rollo, Munbyn, SATO, Brother, DYMO... anything with a CUPS driver).[br][br]Setup: start the container, open the WebUI (login with CUPSADMIN/CUPSPASSWORD), add your label printer with the queue name you set in TARGET_PRINTER (default Label_Printer). Vendor drivers (.deb) dropped into /config/drivers are installed at every start. Host networking is required for AirPrint discovery.[br][br]Free software under GPL-3.0. Label detection is based on dodopus/vinted-label-4x6.</Overview>
+  <Category>Tools: Network:Print</Category>
+  <WebUI>http://[IP]:[PORT:631]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/Dyingmisery/cups-label-crop/main/templates/cups-label-crop.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/Dyingmisery/cups-label-crop/main/assets/icon.png</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires>Host networking (for AirPrint/mDNS). A label printer reachable over the network or USB, and its CUPS driver.</Requires>
+  <Config Name="Config" Target="/config" Default="/mnt/user/appdata/cups-label-crop" Mode="rw" Description="CUPS settings, printers, PPDs and the drivers/ drop-in folder. Keep this so printers survive updates." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/cups-label-crop</Config>
+  <Config Name="CUPS admin user" Target="CUPSADMIN" Default="admin" Mode="" Description="User name for the CUPS web UI (port 631) admin pages." Type="Variable" Display="always" Required="true" Mask="false">admin</Config>
+  <Config Name="CUPS admin password" Target="CUPSPASSWORD" Default="" Mode="" Description="Password for the CUPS admin user. Required: pick your own." Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="Target printer queue" Target="TARGET_PRINTER" Default="Label_Printer" Mode="" Description="CUPS queue name of your real label printer. Cropped labels are forwarded here. No spaces (Label_Printer, not Label Printer). Add the printer in the web UI with exactly this name, or set Printer URI below." Type="Variable" Display="always" Required="true" Mask="false">Label_Printer</Config>
+  <Config Name="Crop queue name" Target="CROP_QUEUE_NAME" Default="Label_Crop" Mode="" Description="CUPS queue name of the crop queue (no spaces). Print A4/Letter shipping sheets to this queue." Type="Variable" Display="always" Required="true" Mask="false">Label_Crop</Config>
+  <Config Name="Crop queue display name" Target="CROP_QUEUE_DISPLAY_NAME" Default="Label Crop" Mode="" Description="Name shown on iPhone/Mac/Android print dialogs, e.g. Label Crop or Vinted Label." Type="Variable" Display="always" Required="false" Mask="false">Label Crop</Config>
+  <Config Name="Label width (inches)" Target="LABEL_WIDTH_IN" Default="4" Mode="" Description="Width of the output label in inches. 4 for 4x6. 100x150 mm labels: 3.937." Type="Variable" Display="always" Required="true" Mask="false">4</Config>
+  <Config Name="Label height (inches)" Target="LABEL_HEIGHT_IN" Default="6" Mode="" Description="Height of the output label in inches. 6 for 4x6. 100x150 mm labels: 5.906." Type="Variable" Display="always" Required="true" Mask="false">6</Config>
+  <Config Name="Padding (points)" Target="PADDING_PT" Default="3" Mode="" Description="Extra margin kept around the detected label, in points (72 pt = 1 inch). Default 3." Type="Variable" Display="advanced" Required="false" Mask="false">3</Config>
+  <Config Name="Rotation" Target="ROTATE_MODE" Default="auto|0|90|180|270" Mode="" Description="auto turns sideways labels upright. 0/90/180/270 force a fixed clockwise rotation (use if your labels come out upside down)." Type="Variable" Display="advanced" Required="false" Mask="false">auto</Config>
+  <Config Name="Default sheet size" Target="DEFAULT_SHEET" Default="A4|Letter" Mode="" Description="Sheet size the crop queue advertises, so phones send the whole page. A4 for Vinted/InPost/Evri (UK/EU), Letter for US carriers." Type="Variable" Display="advanced" Required="false" Mask="false">A4</Config>
+  <Config Name="Printer URI (optional)" Target="PRINTER_URI" Default="" Mode="" Description="Optional. Creates the target printer automatically on first start if it does not exist, e.g. socket://192.168.1.50:9100 or ipp://192.168.1.50/ipp/print. Leave empty to add the printer in the web UI." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Printer driver (optional)" Target="PRINTER_PPD" Default="" Mode="" Description="Optional, used with Printer URI. A PPD path (e.g. /config/drivers/ppd/MyPrinter.ppd) or a model name from 'lpinfo -m' (e.g. drv:///sample.drv/zebra.ppd). Empty with an ipp:// URI uses IPP Everywhere." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Target media (optional)" Target="TARGET_MEDIA" Default="" Mode="" Description="Optional. Media/page size name to request from the target printer, e.g. w288h432. Empty picks a 4x6 size automatically." Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Enable AirPrint (Avahi)" Target="ENABLE_AVAHI" Default="true|false" Mode="" Description="Advertise the printers over Bonjour/mDNS so iPhones and Macs find them. Needs host networking." Type="Variable" Display="advanced" Required="false" Mask="false">true</Config>
+  <Config Name="CUPS log level" Target="CUPS_LOG_LEVEL" Default="warn|info|debug|error" Mode="" Description="CUPS error_log level. Use debug while troubleshooting." Type="Variable" Display="advanced" Required="false" Mask="false">warn</Config>
+  <Config Name="USB printers" Target="/dev/bus/usb" Default="/dev/bus/usb" Mode="" Description="Pass USB through for USB label printers. Remove if your printer is network-only." Type="Device" Display="advanced" Required="false" Mask="false">/dev/bus/usb</Config>
+</Container>

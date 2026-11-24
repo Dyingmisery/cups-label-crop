@@ -1,0 +1,14 @@
+# test output
+tests/out/
+__pycache__/
+*.pyc
+# never commit real shipping labels or generated profiles
+*.mobileconfig
+/config/
+real-labels/
+# editor / OS
+.DS_Store
+*.swp
+.vscode/
+.idea/
+*.pgm

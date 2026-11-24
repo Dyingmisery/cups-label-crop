@@ -1,0 +1,128 @@
+#!/bin/sh
+# cups-label-crop-file: labelcrop
+# labelcrop: CUPS backend for cups-label-crop.
+# Copyright (C) 2026 cups-label-crop contributors. GPL-3.0-or-later.
+#
+# Forwards a cropped label PDF to another CUPS queue (your real printer).
+# Device URI: labelcrop:QueueName   (labelcrop://QueueName also works)
+#
+# The crop queue's PPD already runs the label-crop filter, so the job normally
+# arrives here at the label size. If it does not (for example a raw queue),
+# the backend crops it itself before forwarding with lp.
+
+set -eu
+
+CONF=${LABEL_CROP_CONFIG:-/etc/cups-label-crop/label-crop.conf}
+
+# CUPS backend exit codes
+OK=0
+FAILED=1
+CANCEL=5
+
+conf_get() {
+    # conf_get KEY  -> value from the config file, or empty
+    [ -r "$CONF" ] || return 0
+    sed -n "s/^$1=//p" "$CONF" | tail -n 1
+}
+
+# Find the cropper: config file, then CUPS's ServerBin, then the usual paths.
+CROP_BIN=$(conf_get CROP_BIN)
+if [ -z "$CROP_BIN" ] || [ ! -x "$CROP_BIN" ]; then
+    for c in "${CUPS_SERVERBIN:-}/filter/label-crop" /usr/lib/cups/filter/label-crop /usr/libexec/cups/filter/label-crop; do
+        if [ -x "$c" ]; then CROP_BIN=$c; break; fi
+    done
+fi
+
+if [ $# -eq 0 ]; then
+    echo "direct labelcrop \"Unknown\" \"cups-label-crop forwarder (labelcrop:TargetQueue)\""
+    exit $OK
+fi
+
+if [ $# -lt 5 ]; then
+    echo "ERROR: usage: labelcrop job-id user title copies options [file]" >&2
+    exit $FAILED
+fi
+
+TITLE="$3"
+COPIES="$4"
+FILE="${6:-}"
+
+DEST=${DEVICE_URI:-}
+DEST=${DEST#labelcrop:}
+DEST=${DEST#//}
+DEST=${DEST#/}
+DEST=${DEST%%\?*}
+[ -n "$DEST" ] || DEST=$(conf_get TARGET_PRINTER)
+
+if [ -z "$DEST" ] || [ "$DEST" = "none" ]; then
+    echo "ERROR: no target printer. Set TARGET_PRINTER (or the device URI labelcrop:YourQueue)." >&2
+    exit $FAILED
+fi
+
+if [ -n "${PRINTER:-}" ] && [ "$DEST" = "$PRINTER" ]; then
+    echo "ERROR: $PRINTER cannot forward to itself (set TARGET_PRINTER to your real printer queue)" >&2
+    exit $CANCEL
+fi
+
+if ! lpstat -p "$DEST" >/dev/null 2>&1; then
+    echo "ERROR: target queue '$DEST' does not exist yet. Add your printer in the CUPS web UI with that name, or change TARGET_PRINTER." >&2
+    exit $FAILED
+fi
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/labelcrop.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT INT TERM
+IN="$WORK/in.pdf"
+OUT="$WORK/label.pdf"
+
+if [ -n "$FILE" ] && [ "$FILE" != "-" ]; then
+    cat -- "$FILE" > "$IN"
+else
+    cat > "$IN"
+fi
+
+# Run the cropper in command-line mode; it is a no-op copy when the job is
+# already label-sized (the usual case, since the PPD filter cropped it).
+if [ -z "$CROP_BIN" ] || [ ! -x "$CROP_BIN" ]; then
+    echo "ERROR: label-crop filter not found (looked in CROP_BIN, \$CUPS_SERVERBIN/filter, /usr/lib/cups/filter)" >&2
+    exit $FAILED
+fi
+if ! "$CROP_BIN" --if-needed "$IN" "$OUT"; then
+    echo "ERROR: label-crop could not find a label in this job; cancelling it" >&2
+    exit $CANCEL
+fi
+
+# Pick a page size the target understands. TARGET_MEDIA overrides.
+MEDIA=$(conf_get TARGET_MEDIA)
+if [ -z "$MEDIA" ]; then
+    W_PT=$(conf_get LABEL_WIDTH_PT)
+    H_PT=$(conf_get LABEL_HEIGHT_PT)
+    W_PT=${W_PT:-288}
+    H_PT=${H_PT:-432}
+    if LIST=$(lpoptions -p "$DEST" -l 2>/dev/null); then
+        case "$LIST" in
+            *"w${W_PT}h${H_PT}"*) MEDIA="w${W_PT}h${H_PT}" ;;
+        esac
+        if [ -z "$MEDIA" ] && [ "$W_PT" = 288 ] && [ "$H_PT" = 432 ]; then
+            case "$LIST" in
+                *Custom.4x6in*) MEDIA="Custom.4x6in" ;;
+                *4x6in*) MEDIA="4x6in" ;;
+                *4x6*) MEDIA="4x6" ;;
+                *101.6x152.4mm*) MEDIA="Custom.101.6x152.4mm" ;;
+                *100x150mm*) MEDIA="100x150mm" ;;
+            esac
+        fi
+    fi
+fi
+
+set -- -d "$DEST" -o job-sheets=none -o Collate=False -o fit-to-page=false
+[ -n "$MEDIA" ] && set -- "$@" -o "media=$MEDIA"
+case "$COPIES" in
+    ''|*[!0-9]*) COPIES=1 ;;
+esac
+
+echo "INFO: forwarding label to $DEST${MEDIA:+ (media=$MEDIA)}" >&2
+if ! lp "$@" -n "$COPIES" -t "${TITLE:-label}" -- "$OUT" >&2; then
+    echo "ERROR: lp could not submit the job to $DEST" >&2
+    exit $FAILED
+fi
+exit $OK

@@ -1,0 +1,25 @@
+services:
+  cups-label-crop:
+    image: ghcr.io/dyingmisery/cups-label-crop:latest
+    container_name: cups-label-crop
+    network_mode: host          # required for AirPrint (mDNS)
+    restart: unless-stopped
+    environment:
+      CUPSADMIN: admin
+      CUPSPASSWORD: change-me
+      TARGET_PRINTER: Label_Printer
+      CROP_QUEUE_NAME: Label_Crop
+      CROP_QUEUE_DISPLAY_NAME: Label Crop
+      LABEL_WIDTH_IN: "4"
+      LABEL_HEIGHT_IN: "6"
+      PADDING_PT: "3"
+      ROTATE_MODE: auto
+      DEFAULT_SHEET: A4
+      TZ: Europe/London
+      # Optional: create the target printer automatically
+      # PRINTER_URI: socket://192.168.1.50:9100
+      # PRINTER_PPD: drv:///sample.drv/zebra.ppd
+    volumes:
+      - ./config:/config
+    devices:
+      - /dev/bus/usb:/dev/bus/usb   # remove for network-only printers

@@ -1,0 +1,56 @@
+*PPD-Adobe: "4.3"
+*% cups-label-crop-file: label-crop.ppd
+*FormatVersion: "4.3"
+*FileVersion: "1.0"
+*LanguageVersion: English
+*LanguageEncoding: ISOLatin1
+*PCFileName: "LBLCROP.PPD"
+*Manufacturer: "cups-label-crop"
+*Product: "(Label Crop)"
+*ModelName: "cups-label-crop Label Crop"
+*ShortNickName: "Label Crop"
+*NickName: "cups-label-crop A4/Letter to label"
+*PSVersion: "(3010.000) 0"
+*LanguageLevel: "3"
+*ColorDevice: False
+*DefaultColorSpace: Gray
+*FileSystem: False
+*Throughput: "1"
+*LandscapeOrientation: Plus90
+*TTRasterizer: Type42
+*cupsVersion: 2.0
+*cupsModelNumber: 1
+*cupsManualCopies: True
+*1284DeviceID: "MFG:cups-label-crop;MDL:Label Crop;CMD:PDF;"
+
+*% Accept PDF (and the CUPS pdftopdf output). The filter writes a label-sized PDF
+*% as application/vnd.cups-raw, which the labelcrop backend forwards.
+*cupsFilter2: "application/vnd.cups-pdf application/vnd.cups-raw 0 label-crop"
+*cupsFilter2: "application/pdf application/vnd.cups-raw 0 label-crop"
+
+*% Advertise A4 so iOS AirPrint sends the original A4 or Letter sheet instead of
+*% shrinking the whole sheet onto a label-sized page before it reaches CUPS.
+*OpenUI *PageSize/Media Size: PickOne
+*OrderDependency: 10 AnySetup *PageSize
+*DefaultPageSize: A4
+*PageSize A4/A4: "<</PageSize[595.28 841.89]/ImagingBBox null>>setpagedevice"
+*PageSize Letter/US Letter: "<</PageSize[612 792]/ImagingBBox null>>setpagedevice"
+*CloseUI: *PageSize
+
+*OpenUI *PageRegion/Media Size: PickOne
+*OrderDependency: 10 AnySetup *PageRegion
+*DefaultPageRegion: A4
+*PageRegion A4/A4: "<</PageSize[595.28 841.89]/ImagingBBox null>>setpagedevice"
+*PageRegion Letter/US Letter: "<</PageSize[612 792]/ImagingBBox null>>setpagedevice"
+*CloseUI: *PageRegion
+
+*DefaultImageableArea: A4
+*ImageableArea A4/A4: "0 0 595.28 841.89"
+*ImageableArea Letter/US Letter: "0 0 612 792"
+*DefaultPaperDimension: A4
+*PaperDimension A4/A4: "595.28 841.89"
+*PaperDimension Letter/US Letter: "612 792"
+
+*HWMargins: "0 0 0 0"
+*DefaultFont: Courier
+*Font Courier: Standard "(1.05)" Standard ROM

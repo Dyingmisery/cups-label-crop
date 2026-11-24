@@ -1,0 +1,779 @@
+#!/usr/bin/env python3
+# cups-label-crop-file: label-crop
+"""label-crop: crop a shipping label off an A4/Letter sheet onto a label page.
+
+Part of cups-label-crop <https://github.com/Dyingmisery/cups-label-crop>.
+Copyright (C) 2026 cups-label-crop contributors.
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. It is distributed WITHOUT ANY WARRANTY; see the LICENSE file.
+
+The detection approach follows dodopus/vinted-label-4x6 (GPL-3.0,
+https://github.com/dodopus/vinted-label-4x6): walk the page content stream,
+track the CTM through q/Q/cm, score each placed Form or Image XObject against
+a label-sized window (this is what finds Vinted, InPost and Evri labels on
+their A4 sheets), crop with a little padding, and rotate the label if it lies
+sideways. The crop is then fitted onto an exact label page (4x6 in =
+288 x 432 pt by default), keeping vectors so barcodes stay sharp.
+
+If no XObject matches (flattened or rasterized input, unusual carrier layout),
+it falls back to an ink bounding-box search at 150 dpi.
+
+Settings, highest priority first:
+  command-line flags  --width-in --height-in --padding-pt --rotate
+  environment         LABEL_WIDTH_IN LABEL_HEIGHT_IN PADDING_PT ROTATE_MODE
+  config file         /etc/cups-label-crop/label-crop.conf (KEY=value lines,
+                      written by the container entrypoint, because cupsd does
+                      not pass the container environment to filters)
+  defaults            4 x 6 in, 3 pt padding, rotate auto
+
+Works as a CUPS filter (job-id user title copies options [file]) or as:
+  label-crop [--width-in 4] [--height-in 6] [--padding-pt 3] [--rotate auto|0|90|180|270] input.pdf output.pdf
+"""
+from __future__ import annotations
+
+import os
+import re
+import struct
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+try:
+    from pikepdf import (
+        Name,
+        Page,
+        Pdf,
+        Rectangle,
+        parse_content_stream,
+    )
+except ImportError:
+    sys.stderr.write(
+        "ERROR: python3-pikepdf is required "
+        "(Debian/Ubuntu: apt-get install python3-pikepdf poppler-utils ghostscript)\n"
+    )
+    sys.exit(1)
+
+CONFIG_FILE = os.environ.get("LABEL_CROP_CONFIG", "/etc/cups-label-crop/label-crop.conf")
+ROTATE_CHOICES = ("auto", "0", "90", "180", "270")
+
+
+def _read_config_file(path: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                out[key.strip()] = val.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return out
+
+
+def _setting(key: str, default: str, overrides: dict[str, str]) -> str:
+    if overrides.get(key) not in (None, ""):
+        return overrides[key]
+    if os.environ.get(key) not in (None, ""):
+        return os.environ[key]
+    file_vals = _read_config_file(CONFIG_FILE)
+    if file_vals.get(key) not in (None, ""):
+        return file_vals[key]
+    return default
+
+
+def configure(overrides: dict[str, str] | None = None) -> None:
+    """Load label size, padding and rotation into module globals."""
+    global PAD, TARGET_LO, TARGET_HI, OUT_W, OUT_H, ROTATE_MODE
+    global WIN_LO_MIN, WIN_LO_MAX, WIN_HI_MIN, WIN_HI_MAX, LABEL_W_IN, LABEL_H_IN
+    ov = overrides or {}
+    w_in = float(_setting("LABEL_WIDTH_IN", "4", ov))
+    h_in = float(_setting("LABEL_HEIGHT_IN", "6", ov))
+    if not (0.5 <= w_in <= 20 and 0.5 <= h_in <= 20):
+        raise ValueError(f"label size {w_in}x{h_in} in is out of range")
+    PAD = float(_setting("PADDING_PT", "3", ov))
+    if not (0 <= PAD <= 72):
+        raise ValueError(f"PADDING_PT {PAD} is out of range (0-72)")
+    ROTATE_MODE = _setting("ROTATE_MODE", "auto", ov).lower()
+    if ROTATE_MODE not in ROTATE_CHOICES:
+        raise ValueError(f"ROTATE_MODE must be one of {', '.join(ROTATE_CHOICES)} (got {ROTATE_MODE!r})")
+    LABEL_W_IN, LABEL_H_IN = w_in, h_in
+    # Output page, in PDF points (72 pt = 1 in)
+    OUT_W, OUT_H = w_in * 72.0, h_in * 72.0
+    lo_pt, hi_pt = min(OUT_W, OUT_H), max(OUT_W, OUT_H)
+    # Scoring targets and size window. For 4x6 these are exactly the
+    # constants used by dodopus/vinted-label-4x6 (290/426, 180-360, 300-520).
+    TARGET_LO = lo_pt * 290.0 / 288.0
+    TARGET_HI = hi_pt * 426.0 / 432.0
+    WIN_LO_MIN, WIN_LO_MAX = lo_pt * 180.0 / 288.0, lo_pt * 360.0 / 288.0
+    WIN_HI_MIN, WIN_HI_MAX = hi_pt * 300.0 / 432.0, hi_pt * 520.0 / 432.0
+
+
+PAD = TARGET_LO = TARGET_HI = OUT_W = OUT_H = 0.0
+WIN_LO_MIN = WIN_LO_MAX = WIN_HI_MIN = WIN_HI_MAX = LABEL_W_IN = LABEL_H_IN = 0.0
+ROTATE_MODE = "auto"
+IDENTITY = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+
+
+def log(msg: str) -> None:
+    sys.stderr.write(msg.rstrip() + "\n")
+    sys.stderr.flush()
+
+
+def label_score(w: float, h: float) -> float:
+    lo, hi = min(w, h), max(w, h)
+    if lo > WIN_LO_MAX or hi > WIN_HI_MAX or lo < WIN_LO_MIN or hi < WIN_HI_MIN:
+        return float("inf")
+    return abs(lo - TARGET_LO) / TARGET_LO + abs(hi - TARGET_HI) / TARGET_HI
+
+
+def mul(m, n):
+    return (
+        m[0] * n[0] + m[2] * n[1],
+        m[1] * n[0] + m[3] * n[1],
+        m[0] * n[2] + m[2] * n[3],
+        m[1] * n[2] + m[3] * n[3],
+        m[0] * n[4] + m[2] * n[5] + m[4],
+        m[1] * n[4] + m[3] * n[5] + m[5],
+    )
+
+
+def apply(m, x, y):
+    return (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5])
+
+
+def transform_rect(m, x0, y0, x1, y1):
+    pts = [apply(m, x0, y0), apply(m, x1, y0), apply(m, x1, y1), apply(m, x0, y1)]
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _as_number(obj) -> float:
+    try:
+        return float(obj)
+    except Exception:
+        return float(obj[0])  # type: ignore[index]
+
+
+def _bbox_from_form(xobj) -> tuple[float, float, float, float] | None:
+    try:
+        raw = xobj.get("/BBox")
+        if raw is None:
+            return None
+        vals = [_as_number(raw[i]) for i in range(4)]
+        matrix = xobj.get("/Matrix")
+        if matrix is not None:
+            m = tuple(_as_number(matrix[i]) for i in range(6))
+            return transform_rect(m, *vals)
+        return vals[0], vals[1], vals[2], vals[3]
+    except Exception:
+        return None
+
+
+def _xobject_dict(page: Page):
+    try:
+        resources = page.get("/Resources")
+        if resources is None:
+            return None
+        return resources.get("/XObject")
+    except Exception:
+        return None
+
+
+def _iter_do_placements(page: Page):
+    """Yield (name, ctm) for each 'name Do' in the page content stream."""
+    try:
+        ops = parse_content_stream(page)
+    except Exception as exc:
+        log(f"DEBUG: parse_content_stream failed: {exc}")
+        return
+    ctm = IDENTITY
+    stack: list[tuple] = []
+    for operands, operator in ops:
+        op = str(operator)
+        if op == "q":
+            stack.append(ctm)
+        elif op == "Q":
+            ctm = stack.pop() if stack else IDENTITY
+        elif op == "cm" and len(operands) >= 6:
+            try:
+                nums = tuple(float(x) for x in operands[:6])
+                ctm = mul(ctm, nums)
+            except Exception:
+                pass
+        elif op == "Do" and operands:
+            yield operands[0], ctm
+
+
+def find_label_box(page: Page) -> dict | None:
+    """Return the best label-sized placed XObject, in unrotated page space."""
+    xobjs = _xobject_dict(page)
+    candidates = []
+    for name, ctm in _iter_do_placements(page):
+        box = None
+        kind = "unknown"
+        xobj = None
+        if xobjs is not None:
+            try:
+                key = name if str(name).startswith("/") else Name("/" + str(name).lstrip("/"))
+                xobj = xobjs.get(key)
+            except Exception:
+                xobj = None
+        if xobj is not None:
+            subtype = str(xobj.get("/Subtype", ""))
+            if subtype == "/Form":
+                bb = _bbox_from_form(xobj)
+                if bb:
+                    box = transform_rect(ctm, *bb)
+                    kind = "form"
+            elif subtype == "/Image":
+                # Images are mapped from the unit square through the CTM
+                box = transform_rect(ctm, 0, 0, 1, 1)
+                kind = "image"
+        if box is None:
+            continue
+        x0, y0, x1, y1 = box
+        w, h = x1 - x0, y1 - y0
+        score = label_score(w, h)
+        candidates.append(
+            {"x0": x0, "y0": y0, "x1": x1, "y1": y1, "score": score, "kind": kind, "name": str(name)}
+        )
+    scored = [c for c in candidates if c["score"] < float("inf")]
+    if not scored:
+        if candidates:
+            log(f"DEBUG: {len(candidates)} XObject(s) placed, none in the label size window")
+        return None
+    best = min(scored, key=lambda c: c["score"])
+    log(
+        f"DEBUG: XObject {best['name']} ({best['kind']}) "
+        f"{best['x1']-best['x0']:.1f}x{best['y1']-best['y0']:.1f} pt score={best['score']:.3f}"
+    )
+    return best
+
+
+def page_media(page: Page) -> tuple[float, float, float, float]:
+    mb = page.mediabox
+    return float(mb[0]), float(mb[1]), float(mb[2]), float(mb[3])
+
+
+def clamp_box(box: dict, media: tuple[float, float, float, float], pad: float | None = None) -> dict:
+    if pad is None:
+        pad = PAD
+    mx0, my0, mx1, my1 = media
+    x0 = max(mx0, box["x0"] - pad)
+    y0 = max(my0, box["y0"] - pad)
+    x1 = min(mx1, box["x1"] + pad)
+    y1 = min(my1, box["y1"] + pad)
+    if x1 <= x0 or y1 <= y0:
+        raise ValueError("clamped crop box is empty")
+    return {"x0": x0, "y0": y0, "x1": x1, "y1": y1}
+
+
+def already_label_sized(page: Page) -> dict | None:
+    """If the page itself is already label-sized, treat the whole page as the label."""
+    x0, y0, x1, y1 = page_media(page)
+    try:
+        cb = page.cropbox
+        x0, y0, x1, y1 = float(cb[0]), float(cb[1]), float(cb[2]), float(cb[3])
+    except Exception:
+        pass
+    w, h = x1 - x0, y1 - y0
+    # Honour /Rotate 90 or 270 by swapping displayed width/height for the score,
+    # but crop in unrotated space (the whole media/crop box).
+    rotate = 0
+    try:
+        rotate = int(page.get("/Rotate", 0)) % 360
+    except Exception:
+        rotate = 0
+    dw, dh = (h, w) if rotate in (90, 270) else (w, h)
+    if label_score(dw, dh) < float("inf"):
+        log(f"DEBUG: page is already label-sized ({w:.1f}x{h:.1f} pt, /Rotate={rotate})")
+        return {"x0": x0, "y0": y0, "x1": x1, "y1": y1}
+    return None
+
+
+def _skip_pnm_comments(f):
+    while True:
+        pos = f.tell()
+        ch = f.read(1)
+        if ch == b"#":
+            f.readline()
+            continue
+        if ch in (b" ", b"\t", b"\n", b"\r"):
+            continue
+        f.seek(pos)
+        return
+
+
+def _read_pnm_token(f) -> bytes:
+    _skip_pnm_comments(f)
+    tok = b""
+    while True:
+        ch = f.read(1)
+        if not ch or ch in (b" ", b"\t", b"\n", b"\r"):
+            break
+        tok += ch
+    return tok
+
+
+def _read_pbm(path: Path) -> tuple[int, int, list[list[int]]]:
+    """Return (width, height, rows) where 1 is ink (black) and 0 is paper."""
+    with open(path, "rb") as f:
+        magic = _read_pnm_token(f)
+        width = int(_read_pnm_token(f))
+        height = int(_read_pnm_token(f))
+        if magic == b"P4":
+            rowbytes = (width + 7) // 8
+            pixels = []
+            for _ in range(height):
+                raw = f.read(rowbytes)
+                row = []
+                for x in range(width):
+                    bit = (raw[x // 8] >> (7 - (x % 8))) & 1
+                    row.append(bit)  # PBM: 1 is black
+                pixels.append(row)
+            return width, height, pixels
+        if magic in (b"P5", b"P6"):
+            maxval = int(_read_pnm_token(f))
+            bands = 1 if magic == b"P5" else 3
+            sample = 1 if maxval < 256 else 2
+            pixels = []
+            for _ in range(height):
+                row = []
+                for _x in range(width):
+                    data = f.read(sample * bands)
+                    if bands == 1:
+                        val = int.from_bytes(data, "big")
+                    else:
+                        if sample == 1:
+                            r, g, b = data[0], data[1], data[2]
+                        else:
+                            r, g, b = struct.unpack(">HHH", data)
+                        val = (r + g + b) // 3
+                    row.append(1 if val < maxval * 0.85 else 0)
+                pixels.append(row)
+            return width, height, pixels
+    raise ValueError(f"unsupported PNM type {magic!r} in {path}")
+
+
+def ink_label_box(pdf_path: Path, page_index: int, media: tuple[float, float, float, float]) -> dict | None:
+    """Rasterize one page and find a label-sized ink rectangle, in PDF points."""
+    mx0, my0, mx1, my1 = media
+    page_w, page_h = mx1 - mx0, my1 - my0
+    dpi = 150
+    with tempfile.TemporaryDirectory(prefix="label-crop-ink-") as td:
+        out_prefix = Path(td) / "page"
+        # pdftoppm is 1-indexed
+        cmd = [
+            "pdftoppm",
+            "-r",
+            str(dpi),
+            "-f",
+            str(page_index + 1),
+            "-l",
+            str(page_index + 1),
+            "-mono",
+            str(pdf_path),
+            str(out_prefix),
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+        except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+            # Ghostscript fallback
+            pbm = Path(td) / "page.pbm"
+            gs_cmd = [
+                "gs",
+                "-dSAFER",
+                "-dBATCH",
+                "-dNOPAUSE",
+                "-dQUIET",
+                "-sDEVICE=pbmraw",
+                f"-r{dpi}",
+                f"-dFirstPage={page_index + 1}",
+                f"-dLastPage={page_index + 1}",
+                f"-sOutputFile={pbm}",
+                str(pdf_path),
+            ]
+            try:
+                subprocess.run(gs_cmd, check=True, capture_output=True)
+            except Exception as exc2:
+                log(f"DEBUG: ink rasterize failed: {exc}; gs: {exc2}")
+                return None
+            pbm_path = pbm
+        else:
+            found = list(Path(td).glob("page*.pbm")) + list(Path(td).glob("page*.pgm"))
+            if not found:
+                log("DEBUG: pdftoppm produced no bitmap")
+                return None
+            pbm_path = found[0]
+        try:
+            width, height, pixels = _read_pbm(pbm_path)
+        except Exception as exc:
+            log(f"DEBUG: failed to read raster {pbm_path}: {exc}")
+            return None
+
+    ink = [(x, y) for y, row in enumerate(pixels) for x, v in enumerate(row) if v]
+    if not ink:
+        log("DEBUG: ink fallback found no marks")
+        return None
+    minx = min(p[0] for p in ink)
+    maxx = max(p[0] for p in ink)
+    miny = min(p[1] for p in ink)
+    maxy = max(p[1] for p in ink)
+
+    def px_to_pdf(x, y):
+        # pdftoppm/gs origin is top-left; PDF origin is bottom-left
+        px = mx0 + x * page_w / width
+        py = my0 + (height - 1 - y) * page_h / height
+        return px, py
+
+    # Convert tight ink bbox corners
+    # (minx, maxy) is visually bottom-left in PDF after flip
+    corners = [
+        px_to_pdf(minx, miny),
+        px_to_pdf(maxx, miny),
+        px_to_pdf(minx, maxy),
+        px_to_pdf(maxx, maxy),
+    ]
+    x0 = min(p[0] for p in corners)
+    y0 = min(p[1] for p in corners)
+    x1 = max(p[0] for p in corners)
+    y1 = max(p[1] for p in corners)
+    score = label_score(x1 - x0, y1 - y0)
+    if score < float("inf"):
+        log(
+            f"DEBUG: ink bbox {x1-x0:.1f}x{y1-y0:.1f} pt score={score:.3f}"
+        )
+        return {"x0": x0, "y0": y0, "x1": x1, "y1": y1, "score": score, "kind": "ink"}
+
+    # Ink region is larger than the label (instructions around it). Search for
+    # the densest window whose size is the label size at this DPI
+    # (DPI is pixels per inch, so 4 inches = 4*dpi px).
+    short_in, long_in = min(LABEL_W_IN, LABEL_H_IN), max(LABEL_W_IN, LABEL_H_IN)
+    win_w4 = int(round(short_in * dpi))
+    win_h6 = int(round(long_in * dpi))
+    win_w6 = int(round(long_in * dpi))
+    win_h4 = int(round(short_in * dpi))
+
+    def densest(win_w, win_h):
+        # Integral image for fast window sums, clipped to the ink bbox plus margin
+        x_a = max(0, minx - 2)
+        x_b = min(width, maxx + 3)
+        y_a = max(0, miny - 2)
+        y_b = min(height, maxy + 3)
+        if x_b - x_a < win_w or y_b - y_a < win_h:
+            return None
+        ii = [[0] * (width + 1) for _ in range(height + 1)]
+        for y in range(height):
+            run = 0
+            for x in range(width):
+                run += pixels[y][x]
+                ii[y + 1][x + 1] = ii[y][x + 1] + run
+
+        def sm(x, y, w, h):
+            return ii[y + h][x + w] - ii[y][x + w] - ii[y + h][x] + ii[y][x]
+
+        best = None
+        # Step by 8 px (~1.2 pt at 150 dpi) for speed
+        step = 8
+        for y in range(y_a, y_b - win_h + 1, step):
+            for x in range(x_a, x_b - win_w + 1, step):
+                s = sm(x, y, win_w, win_h)
+                if best is None or s > best[0]:
+                    best = (s, x, y, win_w, win_h)
+        return best
+
+    portrait = densest(win_w4, win_h6)
+    landscape = densest(win_w6, win_h4)
+    bestw = None
+    for cand in (portrait, landscape):
+        if cand and (bestw is None or cand[0] > bestw[0]):
+            bestw = cand
+    if not bestw or bestw[0] <= 0:
+        log("DEBUG: ink fallback could not fit a label-sized window")
+        return None
+    _, wx, wy, ww, wh = bestw
+    corners = [
+        px_to_pdf(wx, wy),
+        px_to_pdf(wx + ww - 1, wy),
+        px_to_pdf(wx, wy + wh - 1),
+        px_to_pdf(wx + ww - 1, wy + wh - 1),
+    ]
+    x0 = min(p[0] for p in corners)
+    y0 = min(p[1] for p in corners)
+    x1 = max(p[0] for p in corners)
+    y1 = max(p[1] for p in corners)
+    log(f"DEBUG: ink densest window {x1-x0:.1f}x{y1-y0:.1f} pt")
+    return {"x0": x0, "y0": y0, "x1": x1, "y1": y1, "kind": "ink-window"}
+
+
+def detect_box(page: Page, pdf_path: Path | None, page_index: int) -> dict:
+    box = find_label_box(page)
+    if box is None:
+        already = already_label_sized(page)
+        if already is not None:
+            return already
+    if box is None and pdf_path is not None:
+        box = ink_label_box(pdf_path, page_index, page_media(page))
+    if box is None:
+        raise RuntimeError(
+            f"no {LABEL_W_IN:g}x{LABEL_H_IN:g} in label found (no matching XObject and ink detection failed)"
+        )
+    return clamp_box(box, page_media(page))
+
+
+def _copy_page_to_new_pdf(src_page: Page) -> tuple[Pdf, Page]:
+    tmp = Pdf.new()
+    tmp.pages.append(src_page)
+    return tmp, tmp.pages[0]
+
+
+def set_page_boxes(page: Page, box: dict) -> None:
+    rect = [box["x0"], box["y0"], box["x1"], box["y1"]]
+    page.mediabox = rect
+    page.cropbox = rect
+    try:
+        page.trimbox = rect
+    except Exception:
+        pass
+    try:
+        page.bleedbox = rect
+    except Exception:
+        pass
+    try:
+        page.artbox = rect
+    except Exception:
+        pass
+
+
+def rotation_for(w: float, h: float) -> int:
+    """Clockwise page rotation to apply to a w x h crop box."""
+    if ROTATE_MODE != "auto":
+        return int(ROTATE_MODE)
+    # Same rule as dodopus/vinted-label-4x6 for a portrait output: a landscape
+    # label is rotated 270 degrees. Generalised: rotate whenever the crop box
+    # orientation differs from the output page orientation.
+    if (w > h) != (OUT_W > OUT_H) and abs(w - h) > 0.5:
+        return 270
+    return 0
+
+
+def emit_label_page(src_page: Page, box: dict) -> tuple[Pdf, Page]:
+    """Return a new PDF containing one OUT_W x OUT_H pt page with the label."""
+    w = box["x1"] - box["x0"]
+    h = box["y1"] - box["y0"]
+    work, work_page = _copy_page_to_new_pdf(src_page)
+    set_page_boxes(work_page, box)
+    # Drop any existing page rotation so the crop box is in a known orientation
+    try:
+        if work_page.get("/Rotate"):
+            work_page.rotate(0, relative=False)
+    except Exception:
+        try:
+            del work_page.obj["/Rotate"]
+        except Exception:
+            pass
+    angle = rotation_for(w, h)
+    if angle:
+        work_page.rotate(angle, relative=True)
+        log(f"DEBUG: rotating label {angle} degrees (ROTATE_MODE={ROTATE_MODE})")
+    dest = Pdf.new()
+    dest_page = dest.add_blank_page(page_size=(OUT_W, OUT_H))
+    dest_page.add_overlay(
+        work_page, Rectangle(0, 0, OUT_W, OUT_H), shrink=True, expand=True
+    )
+    # Keep the work PDF alive until after add_overlay copies the page
+    dest._label_crop_keep = work  # noqa: SLF001
+    return dest, dest_page
+
+
+def crop_pdf(data: bytes, source_path: Path | None = None) -> bytes:
+    if data[:4] == b"UNIR" or data[:8] == b"UNIRAST\x00":
+        raise RuntimeError(
+            "this job arrived as Apple URF raster, not PDF. "
+            "Print the original label PDF (from Files or Safari) so iOS sends application/pdf"
+        )
+    if not data.startswith(b"%PDF"):
+        preview = data[:16]
+        raise RuntimeError(f"input is not a PDF (starts with {preview!r})")
+
+    tmp_in = None
+    path_for_ink = source_path
+    if path_for_ink is None:
+        fd, tmp_name = tempfile.mkstemp(prefix="label-crop-in-", suffix=".pdf")
+        os.close(fd)
+        tmp_in = Path(tmp_name)
+        tmp_in.write_bytes(data)
+        path_for_ink = tmp_in
+
+    try:
+        src = Pdf.open(path_for_ink)
+        if len(src.pages) == 0:
+            raise RuntimeError("PDF has no pages")
+        out = Pdf.new()
+        for i, page in enumerate(src.pages):
+            box = detect_box(page, path_for_ink, i)
+            log(
+                f"INFO: page {i+1}: crop [{box['x0']:.1f} {box['y0']:.1f} {box['x1']:.1f} {box['y1']:.1f}] "
+                f"-> {OUT_W:.0f}x{OUT_H:.0f} pt"
+            )
+            piece, _ = emit_label_page(page, box)
+            out.pages.append(piece.pages[0])
+            # Keep piece until the append has copied it
+            if not hasattr(out, "_label_crop_keep"):
+                out._label_crop_keep = []
+            out._label_crop_keep.append(piece)
+        dest = Path(tempfile.mkstemp(prefix="label-crop-out-", suffix=".pdf")[1])
+        try:
+            out.save(dest)
+            result = dest.read_bytes()
+        finally:
+            try:
+                dest.unlink()
+            except OSError:
+                pass
+        return result
+    finally:
+        if tmp_in is not None:
+            try:
+                tmp_in.unlink()
+            except OSError:
+                pass
+
+
+def already_target_size(data: bytes) -> bool:
+    """True if data is a PDF whose pages are all exactly OUT_W x OUT_H and unrotated."""
+    if not data.startswith(b"%PDF"):
+        return False
+    try:
+        import io
+
+        with Pdf.open(io.BytesIO(data)) as pdf:
+            if len(pdf.pages) == 0:
+                return False
+            for page in pdf.pages:
+                x0, y0, x1, y1 = page_media(page)
+                rot = int(page.get("/Rotate", 0) or 0) % 360
+                if rot or abs((x1 - x0) - OUT_W) > 0.5 or abs((y1 - y0) - OUT_H) > 0.5:
+                    return False
+            return True
+    except Exception:
+        return False
+
+
+def is_cups_filter(argv: list[str]) -> bool:
+    """CUPS runs filters as: name job-id user title copies options [file]."""
+    return len(argv) in (6, 7) and re.fullmatch(r"\d+", argv[1] or "") is not None
+
+
+def read_job(argv: list[str]) -> bytes:
+    if len(argv) >= 7 and argv[6] and argv[6] != "-":
+        return Path(argv[6]).read_bytes()
+    return sys.stdin.buffer.read()
+
+
+def run_cups(argv: list[str]) -> int:
+    title = argv[3] if len(argv) > 3 else "label"
+    try:
+        configure()
+        log(
+            f"INFO: label-crop starting (title={title!r}, label {LABEL_W_IN:g}x{LABEL_H_IN:g} in, "
+            f"padding {PAD:g} pt, rotate {ROTATE_MODE})"
+        )
+        data = read_job(argv)
+        if not data:
+            log("ERROR: empty print job")
+            return 1
+        source = Path(argv[6]) if len(argv) >= 7 and argv[6] not in ("", "-") else None
+        out = crop_pdf(data, source)
+        sys.stdout.buffer.write(out)
+        sys.stdout.buffer.flush()
+        log(f"INFO: wrote {OUT_W:.0f}x{OUT_H:.0f} pt label PDF")
+        return 0
+    except Exception as exc:
+        log(f"ERROR: {exc}")
+        return 1
+
+
+USAGE = (
+    "usage: label-crop [--width-in N] [--height-in N] [--padding-pt N] "
+    "[--rotate auto|0|90|180|270] [--if-needed] input.pdf output.pdf\n"
+    "  --if-needed  copy the input unchanged when every page is already the label size\n"
+)
+FLAG_KEYS = {
+    "--width-in": "LABEL_WIDTH_IN",
+    "--height-in": "LABEL_HEIGHT_IN",
+    "--padding-pt": "PADDING_PT",
+    "--rotate": "ROTATE_MODE",
+}
+
+
+def run_cli(argv: list[str]) -> int:
+    overrides: dict[str, str] = {}
+    files: list[str] = []
+    if_needed = False
+    args = argv[1:]
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-h", "--help"):
+            sys.stderr.write(USAGE)
+            return 2
+        if a == "--if-needed":
+            if_needed = True
+            i += 1
+            continue
+        key, _, val = a.partition("=")
+        if key in FLAG_KEYS:
+            if not val:
+                if i + 1 >= len(args):
+                    sys.stderr.write(USAGE)
+                    return 2
+                i += 1
+                val = args[i]
+            overrides[FLAG_KEYS[key]] = val
+        else:
+            files.append(a)
+        i += 1
+    if len(files) != 2:
+        sys.stderr.write(USAGE)
+        return 2
+    src = Path(files[0])
+    dst = Path(files[1])
+    try:
+        configure(overrides)
+        data = src.read_bytes()
+        if if_needed and already_target_size(data):
+            log(f"INFO: {src} is already {OUT_W:.0f}x{OUT_H:.0f} pt; copying unchanged")
+            out = data
+        else:
+            out = crop_pdf(data, src)
+        dst.write_bytes(out)
+        # Confirm page size for the operator
+        with Pdf.open(dst) as pdf:
+            mb = pdf.pages[0].mediabox
+            w = float(mb[2]) - float(mb[0])
+            h = float(mb[3]) - float(mb[1])
+            rot = int(pdf.pages[0].get("/Rotate", 0) or 0)
+            log(f"INFO: wrote {dst} ({w:.0f}x{h:.0f} pt, /Rotate={rot}, {len(pdf.pages)} page(s))")
+        return 0
+    except Exception as exc:
+        log(f"ERROR: {exc}")
+        return 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv if argv is None else argv)
+    if is_cups_filter(argv):
+        return run_cups(argv)
+    return run_cli(argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

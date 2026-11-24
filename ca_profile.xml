@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<CommunityApplications>
+  <Profile>cups-label-crop by Dyingmisery: a CUPS print server with AirPrint and a "Label Crop" queue for online sellers. It finds the shipping label on Vinted, InPost, Evri and other A4/Letter label sheets, crops and rotates it, and prints a sharp 4x6 label on any CUPS label printer (Zebra, Rollo, Munbyn, SATO, DYMO, Brother). Support and bug reports: GitHub issues or the Unraid forum support thread.</Profile>
+  <Icon>https://raw.githubusercontent.com/Dyingmisery/cups-label-crop/main/assets/icon.png</Icon>
+  <WebPage>https://github.com/Dyingmisery/cups-label-crop</WebPage>
+  <!-- Add once the support thread exists: -->
+  <!-- <Forum>https://forums.unraid.net/topic/REPLACE-WITH-SUPPORT-THREAD/</Forum> -->
+</CommunityApplications>

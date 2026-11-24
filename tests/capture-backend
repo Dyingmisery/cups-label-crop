@@ -1,0 +1,6 @@
+#!/bin/sh
+# Test-only CUPS backend: saves each job to /config/capture/job-<id>.pdf
+[ $# -eq 0 ] && { echo 'direct capture "Unknown" "test capture"'; exit 0; }
+mkdir -p /config/capture
+if [ -n "${6:-}" ]; then cat "$6"; else cat; fi > "/config/capture/job-$1.pdf"
+exit 0
